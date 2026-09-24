@@ -1,5 +1,5 @@
 # ============================================================
-#  opencode-voice — Windows one-time setup (run on EACH PC once)
+#  opencode-voice - Windows one-time setup (run on EACH PC once)
 #  Makes opencode LISTEN (mic -> Groq Whisper) and TALK (Piper).
 #
 #  What it does:
@@ -49,7 +49,9 @@ function Download {
   param($Url, $Out, $Label)
   if (Test-Path $Out) { Write-Host "[SKIP]  already downloaded: $Label" -ForegroundColor DarkGray; return }
   Write-Host "[....]  downloading $Label ..." -ForegroundColor Yellow
-  Invoke-WebRequest -Uri $Url -OutFile $Out -UseBasicParsing
+  # curl -L follows SourceForge/HF redirect chains that Invoke-WebRequest chokes on
+  & curl.exe -sSL -o $Out $Url
+  if ($LASTEXITCODE -ne 0) { Write-Host "[FAIL]  download failed: $Label" -ForegroundColor Red; exit 1 }
   Write-Host "[OK]    downloaded $Label ($([math]::Round((Get-Item $Out).Length/1MB,1)) MB)" -ForegroundColor Green
 }
 
@@ -63,7 +65,7 @@ if (-not $py) { $py = Find-Cmd py }
 if (-not $py) {
   Write-Host "[FAIL]  Python not found." -ForegroundColor Red
   Write-Host "        Install it first, e.g.:  winget install Python.Python.3.12" -ForegroundColor Yellow
-  Write-Host "        (or download from https://www.python.org/downloads/ — tick 'Add to PATH')"
+  Write-Host "        (or download from https://www.python.org/downloads/ - tick 'Add to PATH')"
   Write-Host "        Then run this script again."
   exit 1
 }
@@ -88,7 +90,8 @@ if (-not $piper) {
   $userSite = & $py.Source -c "import site; print(site.USER_BASE)"
   $scriptsDir = Join-Path $userSite "Python3*"
   $scriptsDir = (Get-Item $scriptsDir | Select-Object -First 1).FullName
-  $pipTarget = Join-Path $scriptsDir "piper.exe"
+  $pipTarget = Join-Path (Join-Path $scriptsDir "Scripts") "piper.exe"
+  if (-not (Test-Path $pipTarget)) { $pipTarget = Join-Path $scriptsDir "piper.exe" }
   if (Test-Path $pipTarget) {
     Add-UserPath $scriptsDir
     $piperExe = $pipTarget
@@ -108,7 +111,7 @@ Add-UserPath $scriptsDir
 # Step 3 - decoy "piper" file (plugin's Windows detection hack)
 # ------------------------------------------------------------
 # The plugin checks PATH for a file literally named "piper" (no extension).
-# Windows CAN'T execute that, but CreateProcess appends ".exe" — so we put
+# Windows CAN'T execute that, but CreateProcess appends ".exe" - so we put
 # an empty decoy named "piper" next to the real piper.exe: detection OK,
 # execution finds piper.exe. 
 Write-Host ""
@@ -125,15 +128,16 @@ Write-Host ""
 Write-Host "--- Step 4: sox ---" -ForegroundColor Cyan
 $soxRoot = Join-Path $env:LOCALAPPDATA "voice-tools"
 $soxZip = Join-Path $soxRoot "sox-14.4.2-win32.zip"
-$soxBin = Join-Path $soxRoot "sox-14.4.2-win32"
 New-Item -ItemType Directory -Path $soxRoot -Force | Out-Null
-if (-not (Test-Path (Join-Path $soxBin "sox.exe"))) {
+if (-not (Get-ChildItem -Path $soxRoot -Filter "sox.exe" -Recurse -ErrorAction SilentlyContinue)) {
   Download "https://downloads.sourceforge.net/project/sox/sox/14.4.2/sox-14.4.2-win32.zip" $soxZip "sox"
   Write-Host "[....]  extracting ..." -ForegroundColor Yellow
   Expand-Archive -Path $soxZip -DestinationPath $soxRoot -Force
 }
-$soxExe = Join-Path $soxBin "sox.exe"
-if (-not (Test-Path $soxExe)) { Write-Host "[FAIL]  sox.exe missing after extract." -ForegroundColor Red; exit 1 }
+# the zip's inner folder name varies (sox-14.4.2 / sox-14.4.2-win32) - find sox.exe dynamically
+$soxExe = (Get-ChildItem -Path $soxRoot -Filter "sox.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
+if (-not $soxExe) { Write-Host "[FAIL]  sox.exe missing after extract." -ForegroundColor Red; exit 1 }
+$soxBin = Split-Path $soxExe -Parent
 foreach ($n in "play.exe", "rec.exe") {
   if (-not (Test-Path (Join-Path $soxBin $n))) { Copy-Item $soxExe (Join-Path $soxBin $n) }
 }
@@ -141,6 +145,23 @@ Add-UserPath $soxBin
 $env:Path = "$soxBin;$scriptsDir;$env:Path"
 & $soxExe --version | Select-Object -First 1
 Write-Host "[OK]    sox + play.exe + rec.exe: $soxBin" -ForegroundColor Green
+
+# ------------------------------------------------------------
+# Step 4b - winmm wrappers (sox 14.4.2 MME fallback for Win10+)
+# ------------------------------------------------------------
+Write-Host ""
+Write-Host "--- Step 4b: winmm sox/play wrappers ---" -ForegroundColor Cyan
+# sox 14.4.2's waveaudio driver fails ("no default audio device") on some Win10+ PCs
+# even when audio works. The wrappers use winmm waveIn/waveOut directly and also
+# handle the TTS pipe. They keep the plugin working on every machine.
+$wrapDir = Join-Path $soxRoot "wrappers"
+$wrapBuild = Join-Path $PSScriptRoot "wrappers\build-wrappers.ps1"
+if (Test-Path $wrapBuild) {
+  & powershell -ExecutionPolicy Bypass -File $wrapBuild
+} elseif (-not (Test-Path (Join-Path $wrapDir "sox.exe"))) {
+  Write-Host "[WARN]  wrapper sources not found next to this script - skipping (real sox will be used, may fail on Win10+)" -ForegroundColor Yellow
+}
+Write-Host "[OK]    wrappers active: $wrapDir" -ForegroundColor Green
 
 # ------------------------------------------------------------
 # Step 5 - voice model (Ryan, high quality, offline)

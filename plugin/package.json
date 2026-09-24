@@ -1,0 +1,11 @@
+{
+  "name": "vanta",
+  "version": "1.0.0",
+  "description": "VANTA - always-on voice assistant for opencode. Dark. Fast. Yours.",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "exports": {
+    "./tui": "./index.js"
+  }
+}
